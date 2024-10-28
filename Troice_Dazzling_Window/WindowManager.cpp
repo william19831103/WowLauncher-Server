@@ -92,46 +92,27 @@ void TcpServer::HandleRead(std::shared_ptr<asio::ip::tcp::socket> socket,
 
 void TcpServer::HandleCommand(std::shared_ptr<asio::ip::tcp::socket> socket,
                            const std::string& command) {
-    if (command == Command::GET_NOTICE) {
-        // 确保 noticeContent 是 UTF-8 编码
+    if (command == Command::INIT_SERVER_INFO) {
+        // 构造服务器信息和通知的组合响应
         std::string processedContent = noticeContent;
         
-        // 处理换行符
+        // 处理通知内容中的换行符
         std::string::size_type pos = 0;
         while ((pos = processedContent.find('\n', pos)) != std::string::npos) {
             processedContent.replace(pos, 1, "\\n");
             pos += 2;
         }
 
-        // 添加 BOM 标记以标识 UTF-8 编码
-        std::string utf8Response = std::string("\xEF\xBB\xBF") + "NOTICE|" + processedContent + "<END_OF_MESSAGE>";
+        // 构造组合响应：SERVER_INFO|IP|端口|服务器名称|通知内容
+        std::string combinedResponse = std::string("\xEF\xBB\xBF") + 
+                                     "SERVER_INFO|" + 
+                                     m_serverIP + "|" + 
+                                     std::to_string(m_serverPort) + "|" + 
+                                     m_serverName + "|" + 
+                                     processedContent +
+                                     "<END_OF_MESSAGE>";
         
-        //// 调试输出
-        //std::wstring debugMsg = L"发送消息长度: " + std::to_wstring(utf8Response.length()) + L" 字节";
-        //MessageBoxW(NULL, debugMsg.c_str(), L"发送消息", MB_OK);
-        
-        SendResponse(socket, utf8Response);
-    }
-    else if (command == Command::GET_SERVER_INFO) {
-        // 将服务器名称从UTF-8转换为宽字符用于显示
-        int wideLen = MultiByteToWideChar(CP_UTF8, 0, m_serverName.c_str(), -1, nullptr, 0);
-        std::vector<wchar_t> wideName(wideLen);
-        MultiByteToWideChar(CP_UTF8, 0, m_serverName.c_str(), -1, wideName.data(), wideLen);
-
-        // 构造服务器信息
-        std::string serverInfo = std::string("\xEF\xBB\xBF") + "SERVER_INFO|" + 
-                                m_serverIP + "|" + 
-                                std::to_string(m_serverPort) + "|" + 
-                                m_serverName + 
-                                "<END_OF_MESSAGE>";
-        //
-        //// 调试输出
-        //std::wstring debugMsg = L"发送服务器信息\nIP: " + std::wstring(m_serverIP.begin(), m_serverIP.end()) + 
-        //                       L"\n端口: " + std::to_wstring(m_serverPort) + 
-        //                       L"\n名称: " + std::wstring(wideName.data());
-        //MessageBoxW(NULL, debugMsg.c_str(), L"发送服务器信息", MB_OK);
-        
-        SendResponse(socket, serverInfo);
+        SendResponse(socket, combinedResponse);
     }
     else if (command == Command::GET_FILE) {
         SendResponse(socket, "\xEF\xBB\xBF" "FILE|未实现<END_OF_MESSAGE>");
