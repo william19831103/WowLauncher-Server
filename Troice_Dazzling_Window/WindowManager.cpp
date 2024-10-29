@@ -1,5 +1,7 @@
 #include "WindowManager.h"
 #include "main.h"
+#include <filesystem>
+#include <unordered_map>
 
 
 // 全局变量
@@ -12,6 +14,17 @@ static bool g_serverRunning = false;
 static char serverIP[256] = "127.0.0.1";     // IP地址输入缓冲区
 static int serverPort = 12345;               // 端口号
 static char serverName[256] = "";            // 服务器名称
+
+
+void ConvertAndShowMessage(const std::string& cmdContent) 
+{
+	int wlen = MultiByteToWideChar(CP_UTF8, 0, cmdContent.c_str(), -1, NULL, 0);
+	if (wlen > 0) {
+		std::wstring wstr(wlen, 0);
+		MultiByteToWideChar(CP_UTF8, 0, cmdContent.c_str(), -1, &wstr[0], wlen);
+		MessageBoxW(NULL, wstr.c_str(), L"服务器收到消息", MB_OK);
+	}
+}
 
 // 在文件开头添加初始化函数
 void InitializeServerName() {
@@ -29,6 +42,7 @@ TcpServer::TcpServer(asio::io_context& io_context, short port)
     , isRunning(false)
 {
     LoadNotice();  // 加载通知
+    LoadDataFiles();  // 加载数据文件
 }
 
 void TcpServer::Start() {
@@ -39,6 +53,17 @@ void TcpServer::Start() {
 void TcpServer::Stop() {
     isRunning = false;
     acceptor_.close();
+
+    // 关闭所有客户端连接
+    std::lock_guard<std::mutex> lock(clientsMutex);
+    for (auto& socket : clients) {
+        if (socket->is_open()) {
+            asio::error_code ec;
+            socket->shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+            socket->close(ec);
+        }
+    }
+    clients.clear();
 }
 
 void TcpServer::StartAccept() {
@@ -51,13 +76,41 @@ void TcpServer::StartAccept() {
 void TcpServer::HandleAccept(std::shared_ptr<asio::ip::tcp::socket> socket,
                            const asio::error_code& error) {
     if (!error && isRunning) {
-        auto buffer = std::make_shared<asio::streambuf>();
-        
-        // 使用 async_read_until 读取到换行符
-        asio::async_read_until(*socket, *buffer, '\n',
-            std::bind(&TcpServer::HandleRead, this, socket, buffer,
-                std::placeholders::_1,
-                std::placeholders::_2));
+        try {
+            // 获取客户端连接信息
+            asio::ip::tcp::endpoint remote_ep = socket->remote_endpoint();
+            std::string client_ip = remote_ep.address().to_string();
+            unsigned short client_port = remote_ep.port();
+
+            // 存储客户端连接
+            {
+                std::lock_guard<std::mutex> lock(clientsMutex);
+                clients.push_back(socket);
+            }
+
+            // 显示连接信息
+            std::wstring msg = L"新客户端连接\n"
+                              L"IP: " + std::wstring(client_ip.begin(), client_ip.end()) + 
+                              L"\n端口: " + std::to_wstring(client_port) +
+                              L"\n当前连接数: " + std::to_wstring(clients.size());
+            MessageBoxW(NULL, msg.c_str(), L"连接信息", MB_OK);
+
+            auto buffer = std::make_shared<asio::streambuf>();
+            
+            // 先读取所有可用数据
+            asio::async_read_until(*socket, *buffer, "<END_OF_MESSAGE>",
+                [this, socket, buffer](const asio::error_code& error, std::size_t bytes_transferred) {
+                    HandleRead(socket, buffer, error, bytes_transferred);
+                });
+        }
+        catch (const std::exception& e) {
+            // 如果获取客户端信息失败，显示错误
+            std::string error_msg = "获取客户端信息失败: " + std::string(e.what());
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, error_msg.c_str(), -1, NULL, 0);
+            std::wstring wstr(wlen, 0);
+            MultiByteToWideChar(CP_UTF8, 0, error_msg.c_str(), -1, &wstr[0], wlen);
+            MessageBoxW(NULL, wstr.c_str(), L"错误", MB_OK);
+        }
 
         StartAccept();
     }
@@ -68,57 +121,104 @@ void TcpServer::HandleRead(std::shared_ptr<asio::ip::tcp::socket> socket,
                          const asio::error_code& error,
                          std::size_t bytes_transferred) {
     if (!error) {
-        // 从buffer中提取命令
-        std::string command;
-        std::istream is(buffer.get());
-        std::getline(is, command);
-        
-        // 移除可能的回车符
-        if (!command.empty() && command.back() == '\r') {
-            command.pop_back();
+        // 从buffer中提取所有数据
+        std::string data{
+            asio::buffers_begin(buffer->data()),
+            asio::buffers_begin(buffer->data()) + bytes_transferred
+        };
+        buffer->consume(bytes_transferred);  // 清空缓冲区
+
+        // 查找消息结束标记
+        size_t endPos = data.find("<END_OF_MESSAGE>");
+        if (endPos != std::string::npos) {
+            // 提取有效消息内容
+            std::string command = data.substr(0, endPos);
+            
+            // 处理命令
+            HandleCommand(socket, command);
         }
 
-        // 处理命令
-        HandleCommand(socket, command);
+        // 继续读取下一个消息
+        asio::async_read_until(*socket, *buffer, "<END_OF_MESSAGE>",
+            [this, socket, buffer](const asio::error_code& error, std::size_t bytes_transferred) {
+                HandleRead(socket, buffer, error, bytes_transferred);
+            });
+    }
+    else {
+        // 处理错误，如客户端断开连接
+        try {
+            asio::ip::tcp::endpoint remote_ep = socket->remote_endpoint();
+            std::string client_ip = remote_ep.address().to_string();
+            unsigned short client_port = remote_ep.port();
 
-        // 继续读取下一个命令
-        buffer->consume(bytes_transferred);
-        asio::async_read_until(*socket, *buffer, '\n',
-            std::bind(&TcpServer::HandleRead, this, socket, buffer,
-                std::placeholders::_1,
-                std::placeholders::_2));
+            // 从容器中移除断开的客户端
+            {
+                std::lock_guard<std::mutex> lock(clientsMutex);
+                clients.erase(std::remove_if(clients.begin(), clients.end(),
+                    [&socket](const auto& s) { return s == socket; }), clients.end());
+            }
+
+            // 显示断开连接信息
+            std::wstring msg = L"客户端断开连接\n"
+                              L"IP: " + std::wstring(client_ip.begin(), client_ip.end()) + 
+                              L"\n端口: " + std::to_wstring(client_port) +
+                              L"\n当前连接数: " + std::to_wstring(clients.size());
+            MessageBoxW(NULL, msg.c_str(), L"连接信息", MB_OK);
+        }
+        catch (...) {
+            // 如果获取客户端信息失败，直接移除socket
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            clients.erase(std::remove_if(clients.begin(), clients.end(),
+                [&socket](const auto& s) { return s == socket; }), clients.end());
+        }
     }
 }
 
-void TcpServer::HandleCommand(std::shared_ptr<asio::ip::tcp::socket> socket,
-                           const std::string& command) {
-    if (command == Command::INIT_SERVER_INFO) {
+void TcpServer::HandleCommand(std::shared_ptr<asio::ip::tcp::socket> socket,const std::string& command)
+{
+    // 检查命令是否包含分隔符 "|"
+    size_t separatorPos = command.find("|");
+    if (separatorPos == std::string::npos) {
+        SendResponse(socket, "\xEF\xBB\xBF" "ERROR|Invalid command format<END_OF_MESSAGE>\n");
+        return;
+    }
+
+    // 提取命令头部
+    std::string cmdHeader = command.substr(0, separatorPos + 1);
+    std::string cmdContent = command.substr(separatorPos + 1);
+
+    // 根据命令头部处理不同的业务
+    if (cmdHeader == Command::INIT_SERVER_INFO) {
         // 构造服务器信息和通知的组合响应
         std::string processedContent = noticeContent;
         
-        // 处理通知内容中的换行符
+        // 处理通知内容中的换行符，将其替换为特殊标记
         std::string::size_type pos = 0;
         while ((pos = processedContent.find('\n', pos)) != std::string::npos) {
-            processedContent.replace(pos, 1, "\\n");
-            pos += 2;
+            processedContent.replace(pos, 1, "\\n");  // 使用 "\\n" 替换 "\n"
+            pos += 2;  // 跳过替换的字符
         }
 
         // 构造组合响应：SERVER_INFO|IP|端口|服务器名称|通知内容
-        std::string combinedResponse = std::string("\xEF\xBB\xBF") + 
+        std::string combinedResponse = 
                                      "SERVER_INFO|" + 
                                      m_serverIP + "|" + 
                                      std::to_string(m_serverPort) + "|" + 
                                      m_serverName + "|" + 
                                      processedContent +
-                                     "<END_OF_MESSAGE>";
-        
+                                     "<END_OF_MESSAGE>\n";        
+
         SendResponse(socket, combinedResponse);
     }
-    else if (command == Command::GET_FILE) {
-        SendResponse(socket, "\xEF\xBB\xBF" "FILE|未实现<END_OF_MESSAGE>");
+    else if (cmdHeader == Command::CHECK_PATCHES) 
+    {
+        // 调试输出
+        ConvertAndShowMessage(cmdContent);
+
+        //SendResponse(socket, response);
     }
     else {
-        SendResponse(socket, "\xEF\xBB\xBF" "ERROR|Unknown command<END_OF_MESSAGE>");
+        SendResponse(socket, "ERROR|Unknown command<END_OF_MESSAGE>\n");
     }
 }
 
@@ -169,6 +269,63 @@ void TcpServer::LoadNotice() {
     }
     else {
         MessageBoxW(NULL, L"无法打开通知文件 G.txt\n请确认文件存在且可访问", L"错误", MB_OK);
+    }
+}
+
+void TcpServer::LoadDataFiles() {
+    namespace fs = std::filesystem;
+    std::hash<std::string_view> hasher;
+
+    try {
+        // 遍历当前目录下的 Data 文件夹
+        for (const auto& entry : fs::directory_iterator("Data")) {
+            if (entry.is_regular_file() && entry.path().extension() == ".mpq") {
+                // 读取文件名
+                std::string filename = entry.path().filename().string();
+
+                // 打开文件
+                std::ifstream file(entry.path(), std::ios::binary);
+                if (!file.is_open()) {
+                    continue;  // 如果文件无法打开，跳过
+                }
+
+                // 获取文件大小
+                file.seekg(0, std::ios::end);
+                size_t filesize = file.tellg();
+                file.seekg(0, std::ios::beg);
+
+                // 使用缓冲区读取文件，提高性能
+                const size_t buffer_size = 8192;  // 8KB 缓冲区
+                std::vector<char> buffer(buffer_size);
+                size_t crc = 0;
+
+                while (file) {
+                    file.read(buffer.data(), buffer_size);
+                    std::streamsize count = file.gcount();
+                    if (count > 0) {
+                        // 只计算实际读取的数据
+                        crc ^= hasher(std::string_view(buffer.data(), count));
+                    }
+                }
+                file.close();
+
+                // 存储到容器中
+                fileHashes[filename] = crc;
+            }
+        }
+
+        //// 调试输出
+        //std::wstring debugMsg = L"成功读取 Data 目录下的文件:\n";
+        //for (const auto& [filename, hash] : fileHashes) {
+        //    debugMsg += std::wstring(filename.begin(), filename.end()) + L" - CRC: " + std::to_wstring(hash) + L"\n";
+        //}
+        //MessageBoxW(NULL, debugMsg.c_str(), L"文件加载", MB_OK);
+    }
+    catch (const std::exception& e) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, NULL, 0);
+        std::wstring wstr(wlen, 0);
+        MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, &wstr[0], wlen);
+        MessageBoxW(NULL, wstr.c_str(), L"错误", MB_OK);
     }
 }
 
@@ -259,10 +416,10 @@ void MainWindow() {
                     MultiByteToWideChar(CP_UTF8, 0, serverName, -1, wideName.data(), wideLen);
 
                     // 显示消息
-                    std::wstring msg = L"服务器已启动\nIP: " + std::wstring(serverIP, serverIP + strlen(serverIP)) + 
-                                     L"\n端口: " + std::to_wstring(serverPort) + 
-                                     L"\n名称: " + std::wstring(wideName.data());
-                    MessageBoxW(NULL, msg.c_str(), L"服务器状态", MB_OK);
+                    //std::wstring msg = L"服务器已启动\nIP: " + std::wstring(serverIP, serverIP + strlen(serverIP)) + 
+                    //                 L"\n端口: " + std::to_wstring(serverPort) + 
+                    //                 L"\n名称: " + std::wstring(wideName.data());
+                    //MessageBoxW(NULL, msg.c_str(), L"服务器状态", MB_OK);
                 }
                 catch (const std::exception& e) {
                     int wlen = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, NULL, 0);

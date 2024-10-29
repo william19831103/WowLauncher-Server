@@ -13,6 +13,8 @@
 #include <functional>
 #include <fstream>
 #include <vector>
+#include <unordered_map>
+#include <mutex>
 
 class TcpServer {
 public:
@@ -21,6 +23,7 @@ public:
     void Stop();
     bool IsRunning() const { return isRunning; }
     void LoadNotice();
+    void LoadDataFiles();
     
     // 添加配置设置函数
     void SetServerConfig(const std::string& ip, int port, const std::string& name) {
@@ -52,6 +55,13 @@ private:
     std::string m_serverIP;
     int m_serverPort;
     std::string m_serverName;
+
+    // 添加 fileHashes 容器
+    std::unordered_map<std::string, size_t> fileHashes;
+
+    // 添加客户端连接容器
+    std::vector<std::shared_ptr<asio::ip::tcp::socket>> clients;
+    std::mutex clientsMutex; // 用于保护 clients 容器的互斥锁
 };
 
 void MainWindow();

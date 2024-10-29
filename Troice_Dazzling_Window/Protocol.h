@@ -28,8 +28,6 @@ struct PacketHeader {
 
 // 定义命令字符串
 namespace Command {
-    const std::string GET_NOTICE = "GET_NOTICE";
-    const std::string INIT_SERVER_INFO = "INIT_SERVER_INFO";  // 新的合并命令
-    const std::string GET_FILE = "GET_FILE";
-    const std::string GET_SERVER_INFO = "GET_SERVER_INFO";  // 添加新命令
+    const std::string INIT_SERVER_INFO = "INIT_SERVER_INFO|";  // 服务器初始化信息
+    const std::string CHECK_PATCHES = "CHECK_PATCHES|"; //校验补丁
 }
