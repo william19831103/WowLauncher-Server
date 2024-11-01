@@ -77,7 +77,7 @@ void TcpServer::HandleAccept(std::shared_ptr<asio::ip::tcp::socket> socket,
                            const asio::error_code& error) {
     if (!error && isRunning) {
         try {
-            // 获取客户端连接信息
+            // 获取客户端连接信
             asio::ip::tcp::endpoint remote_ep = socket->remote_endpoint();
             std::string client_ip = remote_ep.address().to_string();
             unsigned short client_port = remote_ep.port();
@@ -88,23 +88,24 @@ void TcpServer::HandleAccept(std::shared_ptr<asio::ip::tcp::socket> socket,
                 clients.push_back(socket);
             }
 
-            // 显示连接信息
-            std::wstring msg = L"新客户端连接\n"
-                              L"IP: " + std::wstring(client_ip.begin(), client_ip.end()) + 
-                              L"\n端口: " + std::to_wstring(client_port) +
-                              L"\n当前连接数: " + std::to_wstring(clients.size());
-            MessageBoxW(NULL, msg.c_str(), L"连接信息", MB_OK);
+            //// 显示连接信息
+            //std::wstring msg = L"新客户端连接\n"
+            //                  L"IP: " + std::wstring(client_ip.begin(), client_ip.end()) + 
+            //                  L"\n端口: " + std::to_wstring(client_port) +
+            //                  L"\n当前连接数: " + std::to_wstring(clients.size());
+            //MessageBoxW(NULL, msg.c_str(), L"连接信息", MB_OK);
 
             auto buffer = std::make_shared<asio::streambuf>();
             
             // 先读取所有可用数据
             asio::async_read_until(*socket, *buffer, "<END_OF_MESSAGE>",
-                [this, socket, buffer](const asio::error_code& error, std::size_t bytes_transferred) {
+                [this, socket, buffer](const asio::error_code& error, std::size_t bytes_transferred) 
+                {
                     HandleRead(socket, buffer, error, bytes_transferred);
                 });
         }
         catch (const std::exception& e) {
-            // 如果获取客户端信息失败，显示错误
+            // 如果获取户端信息失败，显示错误
             std::string error_msg = "获取客户端信息失败: " + std::string(e.what());
             int wlen = MultiByteToWideChar(CP_UTF8, 0, error_msg.c_str(), -1, NULL, 0);
             std::wstring wstr(wlen, 0);
@@ -133,12 +134,11 @@ void TcpServer::HandleRead(std::shared_ptr<asio::ip::tcp::socket> socket,
         if (endPos != std::string::npos) {
             // 提取有效消息内容
             std::string command = data.substr(0, endPos);
-            
             // 处理命令
             HandleCommand(socket, command);
         }
 
-        // 继续读取下一个消息
+        // 继续读下一个消息
         asio::async_read_until(*socket, *buffer, "<END_OF_MESSAGE>",
             [this, socket, buffer](const asio::error_code& error, std::size_t bytes_transferred) {
                 HandleRead(socket, buffer, error, bytes_transferred);
@@ -175,7 +175,7 @@ void TcpServer::HandleRead(std::shared_ptr<asio::ip::tcp::socket> socket,
 }
 
 void TcpServer::HandleCommand(std::shared_ptr<asio::ip::tcp::socket> socket,const std::string& command)
-{
+{ 
     // 检查命令是否包含分隔符 "|"
     size_t separatorPos = command.find("|");
     if (separatorPos == std::string::npos) {
@@ -191,12 +191,12 @@ void TcpServer::HandleCommand(std::shared_ptr<asio::ip::tcp::socket> socket,cons
     if (cmdHeader == Command::INIT_SERVER_INFO) {
         // 构造服务器信息和通知的组合响应
         std::string processedContent = noticeContent;
-        
+                
         // 处理通知内容中的换行符，将其替换为特殊标记
         std::string::size_type pos = 0;
         while ((pos = processedContent.find('\n', pos)) != std::string::npos) {
             processedContent.replace(pos, 1, "\\n");  // 使用 "\\n" 替换 "\n"
-            pos += 2;  // 跳过替换的字符
+            pos += 2;  // 的字符
         }
 
         // 构造组合响应：SERVER_INFO|IP|端口|服务器名称|通知内容
@@ -206,16 +206,109 @@ void TcpServer::HandleCommand(std::shared_ptr<asio::ip::tcp::socket> socket,cons
                                      std::to_string(m_serverPort) + "|" + 
                                      m_serverName + "|" + 
                                      processedContent +
-                                     "<END_OF_MESSAGE>\n";        
+                                     "<END_OF_MESSAGE>";        
+
+        //ConvertAndShowMessage(combinedResponse);
 
         SendResponse(socket, combinedResponse);
     }
     else if (cmdHeader == Command::CHECK_PATCHES) 
     {
-        // 调试输出
-        ConvertAndShowMessage(cmdContent);
+        std::vector<std::string> needUpdateFiles;    // 存储需要更新的文件（CRC不匹配）
+        std::vector<std::string> needDeleteFiles;    // 存储需要删除的文件（服务器不存在）
+        std::vector<std::string> tokens;
+        
+        // 分割字符串
+        std::string token;
+        std::istringstream tokenStream(cmdContent);
+        while (std::getline(tokenStream, token, '|')) {
+            if (!token.empty()) {
+                token.erase(0, token.find_first_not_of(" \t\n\r"));
+                token.erase(token.find_last_not_of(" \t\n\r") + 1);
+                tokens.push_back(token);
+            }
+        }
 
-        //SendResponse(socket, response);
+        // 创建一个集合存储客户端的所有文件名
+        std::set<std::string> clientFiles;
+        for (size_t i = 0; i < tokens.size() - 1; i += 2) {
+            clientFiles.insert(tokens[i]);
+        }
+
+        // 检查客户端发来的文件
+        for (size_t i = 0; i < tokens.size() - 1; i += 2) {
+            std::string filename = tokens[i];
+            try {
+                size_t clientCrc = std::stoull(tokens[i + 1]);
+                auto it = fileHashes.find(filename);
+
+                if (it == fileHashes.end()) {
+                    needDeleteFiles.push_back(filename);
+                }
+                else if (it->second != clientCrc) {
+                    needUpdateFiles.push_back(filename);
+                }
+            }
+            catch (const std::exception&) {
+                continue;
+            }
+        }
+
+        // 检查服务器独有的文件
+        for (const auto& [filename, hash] : fileHashes) {
+            if (clientFiles.find(filename) == clientFiles.end()) {
+                needUpdateFiles.push_back(filename);
+            }
+        }
+
+        // 1. 首先发送需要删除的文件列表
+        if (!needDeleteFiles.empty()) {
+            std::string deleteCommand = "DELETE_FILES|";
+            for (const auto& file : needDeleteFiles) {
+                deleteCommand += file + "|";
+            }
+            deleteCommand += "<END_OF_MESSAGE>";
+            //ConvertAndShowMessage(deleteCommand);
+            SendResponse(socket, deleteCommand);
+        }
+
+        // 2. 然后发送需要更新的文件
+        if (!needUpdateFiles.empty()) {
+            for (const auto& filename : needUpdateFiles) {
+                std::string filepath = "Data/" + filename;
+                std::ifstream file(filepath, std::ios::binary);
+                if (!file.is_open()) continue;
+
+                // 获取文件大小
+                file.seekg(0, std::ios::end);
+                std::streamsize fileSize = file.tellg();
+                file.seekg(0, std::ios::beg);
+
+                // 构造包头
+                std::string header = "UPDATE_FILES|" + filename + "|" + std::to_string(fileSize) + "|<START_CONTENT>|";
+
+                // 读取文件内容到临时缓冲区
+                std::vector<char> fileData(fileSize);
+                file.read(fileData.data(), fileSize);
+                file.close();
+
+                // 构造完整消息
+                std::string fullMessage = header;
+                fullMessage.append(fileData.data(), fileSize);
+                fullMessage += "|<END_CONTENT>|<END_OF_MESSAGE>";
+
+                // 检查最终消息大小
+                std::ostringstream finalCheck;
+                finalCheck << "最终消息大小检查:\n"
+                          << "文件大小: " << std::to_string(fileSize) << "\n"
+                          << "完整消息: " << std::to_string(fullMessage.size());
+                ConvertAndShowMessage(finalCheck.str());
+
+                // 发送完整消息
+                SendResponse(socket, fullMessage);
+            }
+        }
+
     }
     else {
         SendResponse(socket, "ERROR|Unknown command<END_OF_MESSAGE>\n");
@@ -245,7 +338,7 @@ void TcpServer::LoadNotice() {
             file.seekg(0);
         }
 
-        // 读取文件内容
+        // 取文件内容
         std::string fileContent((std::istreambuf_iterator<char>(file)),
                               std::istreambuf_iterator<char>());
         file.close();
@@ -277,16 +370,28 @@ void TcpServer::LoadDataFiles() {
     std::hash<std::string_view> hasher;
 
     try {
+        // 检查 Data 目录是否存在
+        if (!fs::exists("Data")) {
+            MessageBoxW(NULL, L"Data 目录不存在", L"错误", MB_OK);
+            return;
+        }
+
         // 遍历当前目录下的 Data 文件夹
         for (const auto& entry : fs::directory_iterator("Data")) {
-            if (entry.is_regular_file() && entry.path().extension() == ".mpq") {
-                // 读取文件名
+
+            if (entry.is_regular_file() && 
+                (entry.path().extension() == ".mpq" || entry.path().extension() == ".MPQ")) {
+                // 读取文件名和完整路径
                 std::string filename = entry.path().filename().string();
+                std::string fullPath = entry.path().string();
 
                 // 打开文件
                 std::ifstream file(entry.path(), std::ios::binary);
                 if (!file.is_open()) {
-                    continue;  // 如果文件无法打开，跳过
+                    std::wstring errorMsg = L"无法打开文件: " + 
+                        std::wstring(fullPath.begin(), fullPath.end());
+                    MessageBoxW(NULL, errorMsg.c_str(), L"错误", MB_OK);
+                    continue;
                 }
 
                 // 获取文件大小
@@ -308,18 +413,11 @@ void TcpServer::LoadDataFiles() {
                     }
                 }
                 file.close();
-
-                // 存储到容器中
+                // 存储到器中
                 fileHashes[filename] = crc;
             }
         }
 
-        //// 调试输出
-        //std::wstring debugMsg = L"成功读取 Data 目录下的文件:\n";
-        //for (const auto& [filename, hash] : fileHashes) {
-        //    debugMsg += std::wstring(filename.begin(), filename.end()) + L" - CRC: " + std::to_wstring(hash) + L"\n";
-        //}
-        //MessageBoxW(NULL, debugMsg.c_str(), L"文件加载", MB_OK);
     }
     catch (const std::exception& e) {
         int wlen = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, NULL, 0);
